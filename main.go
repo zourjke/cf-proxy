@@ -44,6 +44,11 @@ var (
 var (
 	proxyURL  string
 	dnsServer string
+
+	// 浏览器兜底（v1.2.0 新增）。browserPath 为空时该功能完全关闭，
+	// 行为与纯 HTTP 模式逐字节等价。
+	browserPath    string
+	browserTimeout time.Duration
 )
 
 // defaultUA 未指定 User-Agent 时使用的默认值（二进制内 111 字节常量）。
@@ -61,6 +66,10 @@ func main() {
 	port := flag.Int("port", 12525, "监听端口号，默认为12525")
 	flag.StringVar(&proxyURL, "proxy", "", "代理服务器地址，格式：http://host:port 或 socks5://host:port")
 	flag.StringVar(&dnsServer, "dns", "", "DNS 服务地址 (可选)")
+	flag.StringVar(&browserPath, "browser", "",
+		"Chrome/Chromium 可执行文件路径。配置后遇到 CF 挑战页会自动用浏览器过盾；"+
+			"留空则纯 HTTP 模式（指纹过盾 L1/L2 不受影响）")
+	flag.DurationVar(&browserTimeout, "browser-timeout", 30*time.Second, "浏览器过盾超时时间")
 	flag.Parse()
 
 	// 后台异步优选 DNS，避免阻塞启动。
@@ -234,6 +243,30 @@ func handleProxyRequest(w http.ResponseWriter, r *http.Request) {
 		}
 		client.GetTransport().CloseIdleConnections()
 	}()
+
+	// CF 挑战兜底：仅在配置了 -browser 且响应确实是挑战页时启用。
+	// 未配置 -browser、或浏览器不可用时本分支不生效，
+	// 行为与纯 HTTP 模式完全一致（L1/L2 指纹过盾不受影响）。
+	if browserPath != "" && isChallenge(resp) {
+		logrus.Infof("检测到 CF 挑战页，尝试浏览器过盾: %s", rawURL)
+		cks, serr := solveChallenge(rawURL, ua, browserTimeout)
+		if serr != nil {
+			logrus.Warnf("浏览器过盾失败，返回原始响应: %v", serr)
+		} else {
+			jar.SetCookies(u, cks)
+			retry, rerr := client.R().
+				SetContext(r.Context()).
+				SetRetryCount(3).
+				Send(r.Method, rawURL)
+			if rerr != nil {
+				logrus.Warnf("过盾后重取失败，返回原始响应: %v", rerr)
+			} else {
+				resp.Response.Body.Close()
+				resp = retry
+				logrus.Infof("浏览器过盾成功，已重取: %s", rawURL)
+			}
+		}
+	}
 
 	processResponse(w, resp, status, connHeader, bw)
 }

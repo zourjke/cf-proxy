@@ -6,6 +6,8 @@ import (
 	"net/url"
 	"strings"
 	"testing"
+
+	"github.com/imroc/req/v3"
 )
 
 func TestShouldFilterHeaderName(t *testing.T) {
@@ -241,5 +243,134 @@ func TestInjectedCookiePersists(t *testing.T) {
 
 	if len(got) != 2 || !strings.Contains(got[1], "cf_clearance=keepme") {
 		t.Fatalf("注入的 cookie 未持久化: %v", got)
+	}
+}
+
+// ---------- 浏览器兜底：降级保证 ----------
+
+func resetBrowser() {
+	browserMu.Lock()
+	browserInst, browserErr, browserTried = nil, nil, false
+	browserMu.Unlock()
+}
+
+func challengeUpstream(t *testing.T) *httptest.Server {
+	t.Helper()
+	return httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Cf-Mitigated", "challenge")
+		w.WriteHeader(http.StatusOK)
+		w.Write([]byte("challenge-body"))
+	}))
+}
+
+func TestIsChallenge(t *testing.T) {
+	mk := func(k, v string) *req.Response {
+		h := http.Header{}
+		h.Set(k, v) // Set 会规范化 key，与真实 HTTP 解析行为一致
+		return &req.Response{Response: &http.Response{Header: h}}
+	}
+	if !isChallenge(mk("Cf-Mitigated", "challenge")) {
+		t.Error("Cf-Mitigated: challenge 应判定为挑战页")
+	}
+	if !isChallenge(mk("Cf-Mitigated", "Challenge")) {
+		t.Error("值的大小写不敏感匹配失败")
+	}
+	if isChallenge(mk("Server", "cloudflare")) {
+		t.Error("普通响应不应判定为挑战页")
+	}
+	if isChallenge(mk("Cf-Mitigated", "blocked")) {
+		t.Error("Cf-Mitigated 非 challenge 值不应判定为挑战页")
+	}
+	if isChallenge(nil) {
+		t.Error("nil 不应判定为挑战页")
+	}
+}
+
+// 核心保证：未配置 -browser 时，遇到挑战页也必须原样返回，
+// 且绝不启动浏览器 —— L1/L2 行为不受影响。
+func TestNoBrowserWhenUnset(t *testing.T) {
+	resetBrowser()
+	browserPath = ""
+	defer func() { browserPath = "" }()
+
+	up := challengeUpstream(t)
+	defer up.Close()
+
+	rec := proxyGet(t, up.URL, "ua-nobrowser", nil)
+	if rec.Code != http.StatusOK || rec.Body.String() != "challenge-body" {
+		t.Fatalf("纯 HTTP 模式应原样返回挑战页: %d %q", rec.Code, rec.Body.String())
+	}
+	browserMu.Lock()
+	tried := browserTried
+	browserMu.Unlock()
+	if tried {
+		t.Fatal("未配置 -browser 时不应尝试启动浏览器")
+	}
+}
+
+// 配置了不可用的 -browser 路径时必须降级：原样返回，且只尝试一次。
+func TestBadBrowserPathDegrades(t *testing.T) {
+	resetBrowser()
+	browserPath = "/nonexistent/chrome-does-not-exist"
+	defer func() {
+		browserPath = ""
+		resetBrowser()
+	}()
+
+	up := challengeUpstream(t)
+	defer up.Close()
+
+	// 第一次：尝试启动失败 -> 降级，原样返回
+	rec := proxyGet(t, up.URL, "ua-badpath", nil)
+	if rec.Code != http.StatusOK || rec.Body.String() != "challenge-body" {
+		t.Fatalf("浏览器不可用时应原样返回: %d %q", rec.Code, rec.Body.String())
+	}
+	browserMu.Lock()
+	err1, tried1 := browserErr, browserTried
+	browserMu.Unlock()
+	if !tried1 || err1 == nil {
+		t.Fatal("应记录一次启动失败")
+	}
+
+	// 第二次：不得重复尝试启动 —— 复用缓存的错误对象（指针相同即证明未重新启动）
+	rec = proxyGet(t, up.URL, "ua-badpath", nil)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("第二次请求状态码 = %d", rec.Code)
+	}
+	browserMu.Lock()
+	err2, inst2 := browserErr, browserInst
+	browserMu.Unlock()
+	if inst2 != nil {
+		t.Fatal("浏览器不可用时不应有实例")
+	}
+	if err2 != err1 {
+		t.Fatal("第二次请求重新尝试了启动（错误对象不同），失败记忆未生效")
+	}
+}
+
+// 普通响应绝不能触发浏览器路径（零误判）。
+func TestNormalResponseNeverTouchesBrowser(t *testing.T) {
+	resetBrowser()
+	browserPath = "/nonexistent/chrome-does-not-exist"
+	defer func() {
+		browserPath = ""
+		resetBrowser()
+	}()
+
+	up := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+		w.Write([]byte("normal"))
+	}))
+	defer up.Close()
+
+	rec := proxyGet(t, up.URL, "ua-normal", nil)
+	if rec.Code != http.StatusOK || rec.Body.String() != "normal" {
+		t.Fatalf("普通响应被污染: %d %q", rec.Code, rec.Body.String())
+	}
+	browserMu.Lock()
+	tried := browserTried
+	browserMu.Unlock()
+	if tried {
+		t.Fatal("普通响应不应触发浏览器路径")
 	}
 }

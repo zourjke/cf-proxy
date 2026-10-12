@@ -3,6 +3,7 @@ module cf-proxy
 go 1.22.0
 
 require (
+	github.com/go-rod/rod v0.116.2
 	github.com/imroc/req/v3 v3.50.0
 	github.com/sirupsen/logrus v1.9.3
 	golang.org/x/net v0.33.0
@@ -20,6 +21,11 @@ require (
 	github.com/quic-go/qpack v0.5.1 // indirect
 	github.com/quic-go/quic-go v0.48.2 // indirect
 	github.com/refraction-networking/utls v1.6.7 // indirect
+	github.com/ysmood/fetchup v0.2.3 // indirect
+	github.com/ysmood/goob v0.4.0 // indirect
+	github.com/ysmood/got v0.40.0 // indirect
+	github.com/ysmood/gson v0.7.3 // indirect
+	github.com/ysmood/leakless v0.9.0 // indirect
 	go.uber.org/mock v0.5.0 // indirect
 	golang.org/x/crypto v0.31.0 // indirect
 	golang.org/x/exp v0.0.0-20241215155358-4a5509556b9e // indirect

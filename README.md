@@ -37,6 +37,32 @@ html = requests.get(f"{self.cfproxy}{target_url}", headers=self.headers, proxies
 | `-port` | int | `12525` | 监听端口号 |
 | `-proxy` | string | `""` | 上游代理，格式 `http://host:port` 或 `socks5://host:port` |
 | `-dns` | string | `""` | 指定 DNS 服务器；留空则自动优选最快的一个 |
+| `-browser` | string | `""` | Chrome/Chromium 可执行文件路径。**留空 = 纯 HTTP 模式**；配置后遇到 CF 挑战页自动用浏览器过盾 |
+| `-browser-timeout` | duration | `30s` | 浏览器过盾超时 |
+
+### 浏览器兜底（v1.2.0）
+
+配置 `-browser` 后，二进制获得 **L3/L4 过盾能力**：检测到 CF 挑战页时自动用真实
+浏览器过盾、取出 `cf_clearance` 注入会话、再用 HTTP 重取。
+
+```bash
+# 纯 HTTP 模式（默认，L1/L2 指纹过盾）
+./cf-proxy -port 12525
+
+# 开启浏览器兜底
+./cf-proxy -port 12525 -browser /usr/bin/google-chrome
+```
+
+**降级保证**（已实测，见 docs/README_DEV.md）：
+
+| 场景 | 行为 |
+|---|---|
+| 不传 `-browser` | 浏览器代码路径**永不执行**，L1/L2 行为与纯 HTTP 版逐字节一致 |
+| `-browser` 路径不可用 | 启动告警 + **自动降级纯 HTTP**，且只尝试一次（失败记忆） |
+| 请求未遇挑战 | 走原 HTTP 路径，**零额外开销**，不启动浏览器 |
+| 浏览器过盾失败 | **原样返回** HTTP 响应，不比纯 HTTP 模式差 |
+
+挑战判定只认 `Cf-Mitigated: challenge` 响应头（CF 官方信号），普通 403/503 不会误触发。
 
 ## 请求格式
 
@@ -107,6 +133,17 @@ curl -H "Cookie: cf_clearance=<值>" \
 
 ⚠️ `cf_clearance` 绑定 **(出口 IP, User-Agent)**，浏览器与本服务必须同 IP、同 UA；
 用 `-proxy` 让本服务走与浏览器相同的出口。
+
+### 开启 `-browser` 后 L3/L4 可自动处理
+
+配置 `-browser` 后本服务内置浏览器兜底，**不需要外部配合**即可处理 CF 挑战页
+（见上节）。但要注意：
+
+- 该站点的挑战必须是**浏览器可解**的。若站点用交互式 Turnstile、或挑战本身
+  带限流标记（如 `cf_chl_rc_ni`），浏览器同样解不开 —— 本服务会原样返回挑战页。
+- 浏览器必须与本服务**同出口 IP**：Chrome 会继承本服务的 `http_proxy` 等环境变量。
+- 浏览器兜底只对 `Cf-Mitigated: challenge` 触发，其他类型的拦截（Akamai /
+  DataDome / Kasada 等）不适用。
 
 ## 构建
 

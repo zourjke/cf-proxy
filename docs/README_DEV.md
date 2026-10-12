@@ -134,6 +134,55 @@ cf代理服务器启动，监听端口: %d
 | `/health` 端点 | 无 | 有 | 供 drpy-node 插件市场健康探测 |
 | 版本变量 | 无 | `Version/BuildTime/GitCommit` | 由 `-ldflags` 注入 |
 | **Cookie 处理** | 调用方 Cookie 塞进 `Transport.Cookies` 静态列表，**无会话保持** | 按 UA 隔离的 cookie jar，`SetCookieJar` 挂到底层 `http.Client` | 原实现每请求新建 client，jar 恒空，上游 `cf_clearance` 当场丢弃；改为 jar 后可跨请求续期（v1.1.0） |
+| **过盾等级** | 仅 L1/L2（uTLS 指纹） | L1/L2 + 可选 L3/L4（`-browser` 浏览器兜底） | 原始二进制无 JS 能力（v1.2.0） |
+
+### v1.2.0 浏览器兜底实现要点
+
+- 依赖 `github.com/go-rod/rod` v0.116.2（**纯 Go，无 cgo**），
+  已验证 `CGO_ENABLED=0` 下 linux/amd64、linux/arm64、windows/amd64、darwin/arm64
+  全部可交叉编译，未破坏原有构建方式。
+- 挑战判定只认 `Cf-Mitigated: challenge` 响应头 —— CF 官方信号，零误判，
+  普通 403/503 不会误触发浏览器。
+- 浏览器**惰性启动**：仅在首次遇到挑战页时拉起，全程只尝试一次；失败后缓存错误、
+  永久降级为纯 HTTP（不重复尝试，避免拖慢后续请求）。
+- 用 `HeadlessNew(true)`（`--headless=new`）而非老 headless，降低被识别概率。
+- 过盾后把 cookie 注入 jar，用**同一个 client** 重取一次。
+
+#### 降级保证（已实测）
+
+| 二进制 | missav | jable | javdb |
+|---|---|---|---|
+| 原始（生产） | 343921B | 112543B | 72107B |
+| 重建 v1.1 | 343921B | 112543B | 72107B |
+| **重建 v1.2 无 -browser** | **343921B** | **112543B** | **72107B** |
+| **重建 v1.2 坏 -browser 路径** | **343921B** | **112543B** | **72107B** |
+
+四组完全一致 → L1/L2 未被浏览器功能影响。另有 4 个单元用例覆盖：
+`isChallenge` 判定、无 `-browser` 时不启动浏览器、坏路径降级、普通响应零误触发。
+
+#### 全链路验证（可控靶站，确定性）
+
+用本地靶站模拟 CF 挑战（无 cookie → `Cf-Mitigated: challenge` + 写 cookie 的页面）：
+
+```
+纯HTTP(无 -browser): 218B  title='Just a moment...'   ✗
+浏览器兜底:           93B  title='REAL PAGE OK'       ✓
+日志: 检测到 CF 挑战页 → 浏览器兜底已就绪 → 浏览器过盾成功，已重取
+```
+
+#### 未验证项（诚实标注）
+
+2026-10-13 当天**未找到**「纯 HTTP 被挑战、浏览器能解」的公网靶站：
+
+- `nopecha.com/demo/cloudflare`：连 playwright 的 chromium（headless + headful/Xvfb）
+  都解不开，是打码服务的演示站。
+- `zoominfo.com`：浏览器能拿到 `cf_clearance`，但**重载后仍是挑战页**
+  （cookie 含 `cf_chl_rc_ni`，限流型挑战），浏览器同样解不开。
+- `g2.com` / `nowsecure.nl` / `discord.com`：纯 HTTP 就没被挑战，无法区分。
+
+因此**浏览器兜底对真实 L3/L4 站点的效果未经公网验证**，
+仅通过可控靶站证明了链路正确。真实触发场景是 IP 被限流后 CF 升级挑战
+（当天实测 missav/jable 一度出现该状态，后自行恢复）。
 
 ### v1.1.0 会话保持实现要点
 
