@@ -146,3 +146,100 @@ func TestProxyRangeTo206(t *testing.T) {
 		t.Fatalf("状态码 = %d, 期望 206", rec.Code)
 	}
 }
+
+// resetJars 清空全局 cookie jar，避免用例间互相影响。
+func resetJars() {
+	jarMu.Lock()
+	jars = map[string]http.CookieJar{}
+	jarMu.Unlock()
+}
+
+func proxyGet(t *testing.T, target, ua string, cookies []*http.Cookie) *httptest.ResponseRecorder {
+	t.Helper()
+	req := httptest.NewRequest(http.MethodGet, "/?url="+url.QueryEscape(target), nil)
+	req.Header.Set("User-Agent", ua)
+	for _, c := range cookies {
+		req.AddCookie(c)
+	}
+	rec := httptest.NewRecorder()
+	handleProxyRequest(rec, req)
+	return rec
+}
+
+// 上游 Set-Cookie 应被 jar 接住，并在后续同 UA 请求中自动带上。
+func TestCookieSessionPersistence(t *testing.T) {
+	resetJars()
+
+	var echoed []string
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/set":
+			http.SetCookie(w, &http.Cookie{Name: "sid", Value: "abc123", Path: "/"})
+			w.Write([]byte("set"))
+		case "/echo":
+			echoed = append(echoed, r.Header.Get("Cookie"))
+			w.Write([]byte("echo"))
+		}
+	}))
+	defer upstream.Close()
+
+	if rec := proxyGet(t, upstream.URL+"/set", "ua-persist", nil); rec.Code != http.StatusOK {
+		t.Fatalf("/set 状态码 = %d", rec.Code)
+	}
+	if rec := proxyGet(t, upstream.URL+"/echo", "ua-persist", nil); rec.Code != http.StatusOK {
+		t.Fatalf("/echo 状态码 = %d", rec.Code)
+	}
+	if len(echoed) != 1 || !strings.Contains(echoed[0], "sid=abc123") {
+		t.Fatalf("第二次请求未带上 cookie: %v", echoed)
+	}
+
+	// 不同 UA 之间必须隔离
+	echoed = nil
+	if rec := proxyGet(t, upstream.URL+"/echo", "ua-other", nil); rec.Code != http.StatusOK {
+		t.Fatalf("/echo(其他UA) 状态码 = %d", rec.Code)
+	}
+	if len(echoed) != 1 || strings.Contains(echoed[0], "sid=abc123") {
+		t.Fatalf("不同 UA 之间 cookie 泄漏: %v", echoed)
+	}
+}
+
+// 调用方传入的 Cookie（如外部浏览器取得的 cf_clearance）应被注入并转发。
+func TestCallerCookieInjection(t *testing.T) {
+	resetJars()
+
+	var got string
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		got = r.Header.Get("Cookie")
+		w.Write([]byte("ok"))
+	}))
+	defer upstream.Close()
+
+	rec := proxyGet(t, upstream.URL+"/x", "ua-inject",
+		[]*http.Cookie{{Name: "cf_clearance", Value: "xyz789"}})
+	if rec.Code != http.StatusOK {
+		t.Fatalf("状态码 = %d", rec.Code)
+	}
+	if !strings.Contains(got, "cf_clearance=xyz789") {
+		t.Fatalf("注入的 cookie 未转发: %q", got)
+	}
+}
+
+// 注入的 cookie 应进入 jar，后续不带 cookie 的请求仍能自动带上。
+func TestInjectedCookiePersists(t *testing.T) {
+	resetJars()
+
+	var got []string
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		got = append(got, r.Header.Get("Cookie"))
+		w.Write([]byte("ok"))
+	}))
+	defer upstream.Close()
+
+	proxyGet(t, upstream.URL+"/a", "ua-inject2",
+		[]*http.Cookie{{Name: "cf_clearance", Value: "keepme"}})
+	proxyGet(t, upstream.URL+"/b", "ua-inject2", nil)
+
+	if len(got) != 2 || !strings.Contains(got[1], "cf_clearance=keepme") {
+		t.Fatalf("注入的 cookie 未持久化: %v", got)
+	}
+}

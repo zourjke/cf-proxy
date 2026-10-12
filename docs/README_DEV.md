@@ -133,6 +133,19 @@ cf代理服务器启动，监听端口: %d
 | 日志调用 | `logrus` 包级 `Logf(level, ...)` | `logrus.Infof(...)` | logrus 无包级 `Logf`，行为等价 |
 | `/health` 端点 | 无 | 有 | 供 drpy-node 插件市场健康探测 |
 | 版本变量 | 无 | `Version/BuildTime/GitCommit` | 由 `-ldflags` 注入 |
+| **Cookie 处理** | 调用方 Cookie 塞进 `Transport.Cookies` 静态列表，**无会话保持** | 按 UA 隔离的 cookie jar，`SetCookieJar` 挂到底层 `http.Client` | 原实现每请求新建 client，jar 恒空，上游 `cf_clearance` 当场丢弃；改为 jar 后可跨请求续期（v1.1.0） |
+
+### v1.1.0 会话保持实现要点
+
+- `jarFor(ua)` 按 **User-Agent** 隔离 jar：`cf_clearance` 绑定 (出口 IP, UA)，
+  不同 UA 共用会互相污染。
+- 实测确认 `req/v3` 走 `c.httpClient.Do()`（`client.go:1736`），
+  故 `SetCookieJar` 挂到 `httpClient.Jar` 后，Go 会自动承接 Set-Cookie。
+- 调用方传入的 `Cookie` 改为 `jar.SetCookies(u, ...)` 注入，
+  避免与 jar 内同名 cookie 产生重复头。
+- 验证：4 个单元用例（持久化 / UA 隔离 / 注入转发 / 注入持久化）
+  + 真实站点 `httpbingo.org`、`postman-echo.com`
+  （后者返回的 `__cf_bm`、`_cfuvid` 被成功接住并回传）。
 
 ## 5. 不确定项（诚实标注）
 

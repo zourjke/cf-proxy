@@ -19,13 +19,16 @@ import (
 	"io"
 	"net"
 	"net/http"
+	"net/http/cookiejar"
 	"net/textproto"
 	"net/url"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/imroc/req/v3"
 	"github.com/sirupsen/logrus"
+	"golang.org/x/net/publicsuffix"
 
 	"cf-proxy/config"
 )
@@ -90,6 +93,25 @@ func main() {
 func handleHealth(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "application/json")
 	fmt.Fprintf(w, `{"ok":true,"version":%q,"dns":%q}`, Version, dnsServer)
+}
+
+// cookie jar 按 User-Agent 隔离：Cloudflare 的 cf_clearance 等凭据绑定
+// (出口 IP, User-Agent)，不同 UA 共用同一 jar 会互相污染。
+// jar 由 Go 的 cookiejar 自动维护 Set-Cookie 与过期时间。
+var (
+	jarMu sync.Mutex
+	jars  = map[string]http.CookieJar{}
+)
+
+func jarFor(ua string) http.CookieJar {
+	jarMu.Lock()
+	defer jarMu.Unlock()
+	if j, ok := jars[ua]; ok {
+		return j
+	}
+	j, _ := cookiejar.New(&cookiejar.Options{PublicSuffixList: publicsuffix.List})
+	jars[ua] = j
+	return j
 }
 
 // handleProxyRequest 处理 GET /?url=<目标>[&其余参数]。
@@ -170,14 +192,18 @@ func handleProxyRequest(w http.ResponseWriter, r *http.Request) {
 	}
 
 	client := createRestClient(ua)
-	for k, v := range headers {
-		client.SetCommonHeader(k, v)
+
+	// 会话保持：同一 UA 复用同一个 cookie jar，上游 Set-Cookie 自动入库，
+	// 后续请求自动带上（CF 的 cf_clearance 因此可跨请求续期）；
+	// 调用方传入的 Cookie（例如外部浏览器取得的 cf_clearance）也注入其中。
+	jar := jarFor(ua)
+	client.SetCookieJar(jar)
+	if cks := r.Cookies(); len(cks) > 0 {
+		jar.SetCookies(u, cks)
 	}
 
-	// 透传客户端 Cookie。
-	for _, ck := range r.Cookies() {
-		client.GetTransport().Cookies = append(client.GetTransport().Cookies,
-			&http.Cookie{Name: ck.Name, Value: ck.Value})
+	for k, v := range headers {
+		client.SetCommonHeader(k, v)
 	}
 
 	if proxyURL != "" {

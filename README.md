@@ -55,6 +55,8 @@ GET http://127.0.0.1:<port>?url=<urlencode(目标URL)>[&<其余query参数原样
 | **TLS 指纹伪装** | 按 UA 自动选择 Chrome / Firefox / Safari 指纹（`utls`） |
 | **HTTP/3** | 经 `quic-go` 支持 QUIC 上游 |
 | **DNS 优选** | 启动时并发测速 7 个公共 DNS，选最快者 |
+| **会话保持** | 按 User-Agent 隔离的 cookie jar，自动承接上游 Set-Cookie（`cf_clearance`、`__cf_bm` 等可跨请求续期） |
+| **Cookie 注入** | 调用方传入的 `Cookie` 头会注入会话，可用于喂入外部浏览器取得的 `cf_clearance` |
 | **智能重试** | 网络错误或非成功状态（含 CF 挑战）自动重试，指数退避 3s→100ms，最多 3 次 |
 | **请求头黑名单** | 过滤 13 类跳端/指纹头 + `if-` / `x-` 前缀 |
 | **Referer 改写** | 仅同源 Referer 保留，并改写为本次目标 URL |
@@ -82,6 +84,29 @@ GET /health → {"ok":true,"version":"...","dns":"..."}
 
 > `/health` 是插件化改造时新增的端点，用于 drpy-node 插件市场的健康探测，
 > 不属于原始二进制行为，不影响 `/?url=` 代理路径。
+
+## 能力边界
+
+本服务靠 **TLS 指纹伪装**过盾，**不含 JS 引擎**。因此：
+
+| 防护等级 | 判定依据 | 能否通过 |
+|---|---|---|
+| L1 · WAF / JA3 黑名单 | TLS 指纹不像浏览器即拦 | ✅ 通过 |
+| L2 · Managed Challenge（指纹门禁型） | CF 依指纹+请求头判定为真人，直接发 `cf_clearance` | ✅ 通过 |
+| L3 · Managed Challenge（真发 JS 挑战） | 必须执行 `__cf_chl_` 的 JS 算出答案 | ❌ 不通过 |
+| L4 · Turnstile / 交互式挑战 | JS + 人机交互 | ❌ 不通过 |
+| L5 · Akamai / DataDome / Kasada / Imperva | JS + sensor_data + 行为指纹 | ❌ 不通过 |
+
+**L3 及以上需要外部配合**：用真实浏览器（Camoufox / Patchright / Scrapling
+`StealthyFetcher`）过一次挑战取得 `cf_clearance`，再通过请求头注入本服务：
+
+```bash
+curl -H "Cookie: cf_clearance=<值>" \
+     "http://127.0.0.1:12525?url=https%3A%2F%2Ftarget.example%2Fpath"
+```
+
+⚠️ `cf_clearance` 绑定 **(出口 IP, User-Agent)**，浏览器与本服务必须同 IP、同 UA；
+用 `-proxy` 让本服务走与浏览器相同的出口。
 
 ## 构建
 
