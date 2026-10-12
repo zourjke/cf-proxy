@@ -1,0 +1,78 @@
+name: build
+
+on:
+  push:
+    branches: [main]
+    tags: ['v*']
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: '1.22'
+          cache: true
+      - name: go vet
+        run: go vet ./...
+      - name: go test
+        run: go test -v ./...
+
+  build:
+    needs: test
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: actions/setup-go@v5
+        with:
+          go-version: '1.22'
+          cache: true
+
+      - name: 安装 UPX
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq upx-ucl || true
+          upx --version || echo "UPX 不可用，跳过压缩"
+
+      - name: 跨平台构建
+        run: |
+          chmod +x scripts/build.sh
+          ./scripts/build.sh --all
+
+      - name: 生成插件市场包
+        run: |
+          VER="${GITHUB_REF_NAME#v}"
+          [ "${GITHUB_REF_TYPE}" = "tag" ] || VER="0.0.0-dev.${GITHUB_RUN_NUMBER}"
+          python3 market_zip.py --ver "$VER" --platform android --android build/cf-proxy-android
+          python3 market_zip.py --ver "$VER" --platform win32   --win build/cf-proxy-win.exe
+
+      - name: 上传构建产物
+        uses: actions/upload-artifact@v4
+        with:
+          name: cf-proxy-all-platforms
+          path: |
+            build/
+            dist/
+          if-no-files-found: error
+
+      - name: 发布 Release
+        if: startsWith(github.ref, 'refs/tags/v')
+        uses: softprops/action-gh-release@v2
+        with:
+          generate_release_notes: true
+          files: |
+            dist/*.tar.gz
+            dist/*.zip
+            build/cf-proxy-linux
+            build/cf-proxy-win.exe
+            build/cf-proxy-android
+            build/SHA256SUMS

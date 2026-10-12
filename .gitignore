@@ -1,0 +1,23 @@
+# 构建产物
+/build/
+/dist/
+*.exe
+cf-proxy-linux
+cf-proxy-android
+cf-proxy-win.exe
+SHA256SUMS
+
+# 编辑器 / IDE
+.idea/
+.vscode/
+*.swp
+*~
+
+# 系统
+.DS_Store
+Thumbs.db
+
+# Go
+*.test
+*.out
+vendor/
